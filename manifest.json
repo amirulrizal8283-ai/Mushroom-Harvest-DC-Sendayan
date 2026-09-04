@@ -1,0 +1,16 @@
+{
+  "name": "Harvest Cendawan DC Sendayan",
+  "short_name": "Harvest DCS",
+  "description": "Dashboard live harvest cendawan tiram DC Sendayan — rekod harian, shedhouse dan trend tahunan.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FFFFFF",
+  "theme_color": "#4B6355",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
