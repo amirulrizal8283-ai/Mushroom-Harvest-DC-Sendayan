@@ -854,7 +854,19 @@ setSyncStatus('idle');
 
 if ('serviceWorker' in navigator){
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(()=>{});
+    navigator.serviceWorker.register('sw.js').then((reg) => {
+      // Force an immediate check for a newer sw.js instead of waiting for the
+      // browser's normal (throttled) update schedule.
+      reg.update().catch(()=>{});
+    }).catch(()=>{});
+  });
+  // When a new service worker takes over, the page it's controlling is still
+  // running old code in memory — reload once so the fresh version actually loads.
+  let reloadedOnce = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloadedOnce) return;
+    reloadedOnce = true;
+    window.location.reload();
   });
 }
 </script>
