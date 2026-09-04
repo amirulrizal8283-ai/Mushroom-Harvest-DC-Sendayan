@@ -424,14 +424,15 @@ function setSyncStatus(mode){
   else { label.textContent = 'Cache'; }
 }
 
-/* ============ JSONP live fetch from Google Sheets ============ */
+/* ============ JSONP live fetch from Google Sheets (ranged, type-safe) ============ */
 let jsonpCounter = 0;
-function fetchSheetJSONP(sheetName, timeoutMs){
+function fetchRangeJSONP(sheetName, range, timeoutMs){
   return new Promise((resolve, reject) => {
     const cbName = '__gvizCb_' + (jsonpCounter++) + '_' + Date.now();
     const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID +
       '/gviz/tq?tqx=out:json;responseHandler:' + cbName +
-      '&headers=0&sheet=' + encodeURIComponent(sheetName);
+      '&headers=0&sheet=' + encodeURIComponent(sheetName) +
+      (range ? '&range=' + encodeURIComponent(range) : '');
     let done = false;
     const script = document.createElement('script');
     const timer = setTimeout(() => {
@@ -478,95 +479,95 @@ function cellDate(row, idx){
   return null;
 }
 
-/* Parse RINGKASAN TAHUNAN raw table rows -> annual object */
-function parseAnnual(table){
-  const rows = table.rows;
-  const g = rows[5];   // gross/net/waste/waste%/rekod
-  const b = rows[9];   // opening/in/out/balance/harvest
-  const annual = {
-    gross_kg: cellVal(g,0), net_kg: cellVal(g,3), waste_kg: cellVal(g,6),
-    waste_pct: cellVal(g,9), complete_records: cellVal(g,12),
-    opening_balance: cellVal(b,0), baglog_in: cellVal(b,3), baglog_out: cellVal(b,6),
-    baglog_balance: cellVal(b,9), baglog_harvest: cellVal(b,12),
-    monthly: []
-  };
-  for (let i = 14; i <= 25; i++){
-    const r = rows[i]; if (!r) break;
-    const bulan = cellVal(r,0); if (!bulan) continue;
-    annual.monthly.push({
-      bulan: bulan, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
-      baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
-      net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8),
-      baglog_harvest: cellVal(r,9), rekod_lengkap: cellVal(r,10)
-    });
-  }
-  return annual;
-}
-
-/* Parse a monthly sheet raw table rows -> month object */
-function parseMonth(table, key){
-  const rows = table.rows;
-  const shedhouse_summary = [];
-  for (let i = 6; i <= 11; i++){
-    const r = rows[i]; if (!r) continue;
-    const name = cellVal(r,0); if (!name) continue;
-    shedhouse_summary.push({
-      shedhouse: name, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
-      baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
-      net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8), baglog_harvest: cellVal(r,9)
-    });
-  }
-  let month_total = null;
-  const t = rows[12];
-  if (t && cellVal(t,0) !== null){
-    month_total = {
-      opening_balance: cellVal(t,1), baglog_in: cellVal(t,2), baglog_out: cellVal(t,3),
-      baglog_balance: cellVal(t,4), gross_kg: cellVal(t,5), net_kg: cellVal(t,6),
-      waste_kg: cellVal(t,7), waste_pct: cellVal(t,8), baglog_harvest: cellVal(t,9)
-    };
-  }
-  const daily = [];
-  for (let i = 16; i < rows.length; i++){
-    const r = rows[i]; if (!r) continue;
-    const shed = cellVal(r,3); if (!shed) continue;
-    const bagIn = cellVal(r,4), bagOut = cellVal(r,5), gross = cellVal(r,6),
-          net = cellVal(r,7), waste = cellVal(r,8), wastePct = cellVal(r,9), harvest = cellVal(r,10);
-    if (bagIn===null && bagOut===null && gross===null && net===null && waste===null && harvest===null) continue;
-    daily.push({
-      tarikh: cellDate(r,0), hari: cellVal(r,1), minggu: cellVal(r,2), shedhouse: shed,
-      baglog_in: bagIn, baglog_out: bagOut, gross_kg: gross, net_kg: net,
-      waste_kg: waste, waste_pct: wastePct, baglog_harvest: harvest
-    });
-  }
-  return { name: MONTH_NAMES[MONTH_KEYS.indexOf(key)], shedhouse_summary, month_total, daily };
-}
+/*
+ Each fetch below is scoped to a tight, homogeneous data-only range (no label/header
+ rows mixed in). This matters because the Google Visualization API infers a single
+ data type per column by sampling the whole fetched range — if a range mixes a text
+ label row with a numeric data row in the same column (like the dashboard-style
+ layout of this sheet does across a whole tab), mismatched cells silently come back
+ null. Scoping each fetch to one clean block avoids that entirely.
+*/
 
 async function syncAnnual(){
   try{
-    const table = await fetchSheetJSONP('RINGKASAN TAHUNAN', 8000);
-    DATA.annual = parseAnnual(table);
-    state.liveOK = true;
-    return true;
-  } catch(e){ return false; }
-}
-async function syncMonth(key){
-  try{
-    const table = await fetchSheetJSONP(key, 8000);
-    DATA.months[key] = parseMonth(table, key);
+    const [kpiT, balT, monthlyT] = await Promise.all([
+      fetchRangeJSONP('RINGKASAN TAHUNAN', 'A6:M6', 8000),
+      fetchRangeJSONP('RINGKASAN TAHUNAN', 'A10:M10', 8000),
+      fetchRangeJSONP('RINGKASAN TAHUNAN', 'A15:K26', 8000),
+    ]);
+    const g = kpiT.rows[0];
+    const b = balT.rows[0];
+    const annual = {
+      gross_kg: cellVal(g,0), net_kg: cellVal(g,3), waste_kg: cellVal(g,6),
+      waste_pct: cellVal(g,9), complete_records: cellVal(g,12),
+      opening_balance: cellVal(b,0), baglog_in: cellVal(b,3), baglog_out: cellVal(b,6),
+      baglog_balance: cellVal(b,9), baglog_harvest: cellVal(b,12),
+      monthly: []
+    };
+    monthlyT.rows.forEach(r => {
+      const bulan = cellVal(r,0);
+      if (!bulan) return;
+      annual.monthly.push({
+        bulan: bulan, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
+        baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
+        net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8),
+        baglog_harvest: cellVal(r,9), rekod_lengkap: cellVal(r,10)
+      });
+    });
+    if (!annual.monthly.length) throw new Error('empty monthly parse');
+    DATA.annual = annual;
     state.liveOK = true;
     return true;
   } catch(e){ return false; }
 }
 
-async function manualRefresh(){
-  setSyncStatus('syncing');
-  const okA = await syncAnnual();
-  let okB = true;
-  if (state.view === 'shedhouse') okB = await syncMonth(state.shedMonth);
-  else if (state.view === 'rekod') okB = await syncMonth(state.rekodMonth);
-  else okB = await syncMonth(currentMonthKey());
-  setSyncStatus(okA || okB ? 'live' : 'err');
-  renderAll();
+async function syncMonth(key){
+  try{
+    const [shedT, totT, dailyT] = await Promise.all([
+      fetchRangeJSONP(key, 'A7:J12', 8000),
+      fetchRangeJSONP(key, 'A13:J13', 8000),
+      fetchRangeJSONP(key, 'A17:K1000', 8000),
+    ]);
+    const shedhouse_summary = [];
+    shedT.rows.forEach(r => {
+      const name = cellVal(r,0);
+      if (!name) return;
+      shedhouse_summary.push({
+        shedhouse: name, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
+        baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
+        net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8), baglog_harvest: cellVal(r,9)
+      });
+    });
+    if (shedhouse_summary.length < SHEDHOUSES.length) throw new Error('incomplete shedhouse parse');
+    let month_total = null;
+    const t = totT.rows[0];
+    if (t && cellVal(t,0) !== null){
+      month_total = {
+        opening_balance: cellVal(t,1), baglog_in: cellVal(t,2), baglog_out: cellVal(t,3),
+        baglog_balance: cellVal(t,4), gross_kg: cellVal(t,5), net_kg: cellVal(t,6),
+        waste_kg: cellVal(t,7), waste_pct: cellVal(t,8), baglog_harvest: cellVal(t,9)
+      };
+    }
+    const daily = [];
+    dailyT.rows.forEach(r => {
+      const shed = cellVal(r,3);
+      if (!shed) return;
+      const bagIn = cellVal(r,4), bagOut = cellVal(r,5), gross = cellVal(r,6),
+            net = cellVal(r,7), waste = cellVal(r,8), wastePct = cellVal(r,9), harvest = cellVal(r,10);
+      if (bagIn===null && bagOut===null && gross===null && net===null && waste===null && harvest===null) return;
+      daily.push({
+        tarikh: cellDate(r,0), hari: cellVal(r,1), minggu: cellVal(r,2), shedhouse: shed,
+        baglog_in: bagIn, baglog_out: bagOut, gross_kg: gross, net_kg: net,
+        waste_kg: waste, waste_pct: wastePct, baglog_harvest: harvest
+      });
+    });
+    DATA.months[key] = {
+      name: MONTH_NAMES[MONTH_KEYS.indexOf(key)],
+      shedhouse_summary, month_total, daily
+    };
+    state.liveOK = true;
+    return true;
+  } catch(e){ return false; }
 }
 
 /* ============ Rendering ============ */
