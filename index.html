@@ -735,7 +735,7 @@ function renderShedhouse(){
         <div class="m"><div class="v">${fmt(s.gross_kg,1)}</div><div class="l">Gross kg</div></div>
         <div class="m"><div class="v">${fmt(s.net_kg,1)}</div><div class="l">Net kg</div></div>
         <div class="m"><div class="v">${fmtPct(s.waste_pct)}</div><div class="l">Waste</div></div>
-        <div class="m"><div class="v">${fmt(s.baglog_harvest,0)}</div><div class="l">Habis</div></div>
+        <div class="m"><div class="v">${fmt(s.baglog_harvest,0)}</div><div class="l">Baglog Harvest</div></div>
       </div>`;
     list.appendChild(div);
   });
@@ -746,7 +746,7 @@ function renderShedhouse(){
       <div class="stat-row">
         <div class="stat-box"><div class="v">${fmt(m.month_total.net_kg,0)}</div><div class="l">Net kg</div></div>
         <div class="stat-box rust"><div class="v">${fmtPct(m.month_total.waste_pct)}</div><div class="l">Waste</div></div>
-        <div class="stat-box gold"><div class="v">${fmt(m.month_total.baglog_harvest,0)}</div><div class="l">Baglog habis</div></div>
+        <div class="stat-box gold"><div class="v">${fmt(m.month_total.baglog_harvest,0)}</div><div class="l">Baglog Harvest</div></div>
       </div>`;
     list.appendChild(tot);
   }
