@@ -316,7 +316,7 @@ button{font-family:inherit;}
         </div>
       </div>
 
-      <p class="footer-credit">Data disegerak terus daripada Google Sheet DC Sendayan &middot; build 2026-09-04-4</p>
+      <p class="footer-credit">Data disegerak terus daripada Google Sheet DC Sendayan &middot; build 2026-09-04-5</p>
     </section>
 
     <!-- SHEDHOUSE -->
@@ -507,39 +507,37 @@ function cellDate(row, idx){
 }
 
 /*
- Fixed, absolute row positions in each tab (0-indexed, since headers=0 means
- every row of the sheet comes back in table.rows, nothing pre-stripped as a
- header). These match the sheet's fixed dashboard layout exactly:
-   RINGKASAN TAHUNAN — row 5: annual KPI row · row 9: annual balance row ·
-                        rows 14-25: the 12 monthly rows (Jan..Dis)
-   Each month tab     — rows 6-11: the 6 shedhouse summary rows ·
-                        row 12: month total row · row 15: daily header ·
-                        row 16 onward: daily records
+ Rows are matched by their own label text (month names, shedhouse names, marker
+ rows like "JUMLAH BULAN" / "TARIKH"), scanned across the whole tab — not by a
+ fixed row number. This is what makes the parser resilient to the sheet's actual
+ row layout shifting: the Google Visualization API silently drops fully-blank
+ rows from its response, which was quietly breaking every fixed-row-number
+ assumption tried before this.
 */
 
 async function syncAnnual(){
   try{
-    // Deliberately NOT reading the merged-cell KPI/balance summary rows at all —
-    // those have proven unreliable to read via the API. Instead, the annual
-    // totals are computed client-side by aggregating the 12 monthly rows, which
-    // are a plain (non-merged) table and have read correctly and consistently
-    // every time so far (this is the same data driving the trend chart).
     const table = await fetchSheetJSONP('RINGKASAN TAHUNAN', 9000);
     const rows = table.rows;
+
+    // Monthly rows: wherever a row's first cell exactly matches one of the 12
+    // Malay month names, that's the row for that month.
     const monthly = [];
-    for (let i = 14; i <= 25; i++){
-      const r = rows[i]; if (!r) break;
-      const bulan = cellVal(r,0);
-      if (!bulan) continue;
+    MONTH_NAMES.forEach((name) => {
+      const r = rows.find(rr => cellVal(rr,0) === name);
+      if (!r) return;
       monthly.push({
-        bulan: bulan, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
+        bulan: name, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
         baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
         net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8),
         baglog_harvest: cellVal(r,9), rekod_lengkap: cellVal(r,10)
       });
-    }
+    });
     if (monthly.length !== 12) throw new Error('expected 12 months, got ' + monthly.length);
 
+    // Annual totals are computed by aggregating the 12 monthly rows, rather
+    // than reading the sheet's own merged-cell KPI/balance summary cells
+    // (those have proven unreliable to read via the API — see build notes).
     const sum = (field) => monthly.reduce((acc,m) => acc + (Number(m[field]) || 0), 0);
     const gross_kg = sum('gross_kg');
     const net_kg = sum('net_kg');
@@ -572,41 +570,47 @@ async function syncMonth(key){
   try{
     const table = await fetchSheetJSONP(key, 9000);
     const rows = table.rows;
+
+    // Shedhouse summary rows: wherever a row's first cell exactly matches one
+    // of the 6 known shedhouse names.
     const shedhouse_summary = [];
-    for (let i = 6; i <= 11; i++){
-      const r = rows[i]; if (!r) continue;
-      const name = cellVal(r,0);
-      if (!name) continue;
+    SHEDHOUSES.forEach((name) => {
+      const r = rows.find(rr => cellVal(rr,0) === name);
+      if (!r) return;
       shedhouse_summary.push({
         shedhouse: name, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
         baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
         net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8), baglog_harvest: cellVal(r,9)
       });
-    }
+    });
     if (shedhouse_summary.length < SHEDHOUSES.length) throw new Error('incomplete shedhouse parse');
+
     let month_total = null;
-    const t = rows[12];
-    if (t && cellVal(t,0) !== null){
+    const t = rows.find(rr => cellVal(rr,0) === 'JUMLAH BULAN');
+    if (t){
       month_total = {
         opening_balance: cellVal(t,1), baglog_in: cellVal(t,2), baglog_out: cellVal(t,3),
         baglog_balance: cellVal(t,4), gross_kg: cellVal(t,5), net_kg: cellVal(t,6),
         waste_kg: cellVal(t,7), waste_pct: cellVal(t,8), baglog_harvest: cellVal(t,9)
       };
     }
+
+    // Daily records: any row whose SHEDHOUSE column (index 3 in that table —
+    // a different column than the summary block above, so this never matches
+    // rows from the summary block) is one of the 6 known shedhouse names.
     const daily = [];
-    for (let i = 16; i < rows.length; i++){
-      const r = rows[i]; if (!r) continue;
+    rows.forEach(r => {
       const shed = cellVal(r,3);
-      if (!shed) continue;
+      if (!SHEDHOUSES.includes(shed)) return;
       const bagIn = cellVal(r,4), bagOut = cellVal(r,5), gross = cellVal(r,6),
             net = cellVal(r,7), waste = cellVal(r,8), wastePct = cellVal(r,9), harvest = cellVal(r,10);
-      if (bagIn===null && bagOut===null && gross===null && net===null && waste===null && harvest===null) continue;
+      if (bagIn===null && bagOut===null && gross===null && net===null && waste===null && harvest===null) return;
       daily.push({
         tarikh: cellDate(r,0), hari: cellVal(r,1), minggu: cellVal(r,2), shedhouse: shed,
         baglog_in: bagIn, baglog_out: bagOut, gross_kg: gross, net_kg: net,
         waste_kg: waste, waste_pct: wastePct, baglog_harvest: harvest
       });
-    }
+    });
     DATA.months[key] = {
       name: MONTH_NAMES[MONTH_KEYS.indexOf(key)],
       shedhouse_summary, month_total, daily
