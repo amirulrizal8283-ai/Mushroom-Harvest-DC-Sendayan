@@ -430,15 +430,14 @@ function setSyncStatus(mode){
   else { label.textContent = 'Cache'; }
 }
 
-/* ============ JSONP live fetch from Google Sheets (ranged, type-safe) ============ */
+/* ============ JSONP live fetch from Google Sheets ============ */
 let jsonpCounter = 0;
-function fetchRangeJSONP(sheetName, range, timeoutMs){
+function fetchSheetJSONP(sheetName, timeoutMs){
   return new Promise((resolve, reject) => {
     const cbName = '__gvizCb_' + (jsonpCounter++) + '_' + Date.now();
     const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID +
       '/gviz/tq?tqx=out:json;responseHandler:' + cbName +
-      '&headers=0&sheet=' + encodeURIComponent(sheetName) +
-      (range ? '&range=' + encodeURIComponent(range) : '');
+      '&headers=0&sheet=' + encodeURIComponent(sheetName);
     let done = false;
     const script = document.createElement('script');
     const timer = setTimeout(() => {
@@ -467,14 +466,27 @@ function fetchRangeJSONP(sheetName, range, timeoutMs){
   });
 }
 
+// Read a cell's typed value (c.v); if the Visualization API's column-type
+// guessing has nulled it out (common on sheets that mix text labels and
+// numbers in the same column, like this dashboard-style layout), fall back
+// to parsing the cell's formatted display string (c.f) instead.
 function cellVal(row, idx){
   if (!row || !row.c || !row.c[idx]) return null;
   const c = row.c[idx];
-  if (c.v === undefined) return null;
-  return c.v;
+  if (c.v !== null && c.v !== undefined) return c.v;
+  if (c.f !== undefined && c.f !== null && c.f !== ''){
+    const isPct = String(c.f).indexOf('%') !== -1;
+    const cleaned = String(c.f).replace(/[%,\s]/g,'');
+    const num = parseFloat(cleaned);
+    if (!isNaN(num) && cleaned !== ''){ return isPct ? num/100 : num; }
+    return c.f;
+  }
+  return null;
 }
 function cellDate(row, idx){
-  const v = cellVal(row, idx);
+  if (!row || !row.c || !row.c[idx]) return null;
+  const c = row.c[idx];
+  const v = c.v;
   if (typeof v === 'string' && v.indexOf('Date(') === 0){
     const nums = v.slice(5,-1).split(',').map(Number);
     const dt = new Date(nums[0], nums[1], nums[2]);
@@ -482,28 +494,36 @@ function cellDate(row, idx){
     const dd = String(dt.getDate()).padStart(2,'0');
     return dt.getFullYear() + '-' + mm + '-' + dd;
   }
+  // fallback: parse the displayed date string, e.g. "1-Jan-2026" or "1/1/2026"
+  if (c.f){
+    const d = new Date(c.f);
+    if (!isNaN(d.getTime())){
+      const mm = String(d.getMonth()+1).padStart(2,'0');
+      const dd = String(d.getDate()).padStart(2,'0');
+      return d.getFullYear() + '-' + mm + '-' + dd;
+    }
+  }
   return null;
 }
 
 /*
- Each fetch below is scoped to a tight, homogeneous data-only range (no label/header
- rows mixed in). This matters because the Google Visualization API infers a single
- data type per column by sampling the whole fetched range — if a range mixes a text
- label row with a numeric data row in the same column (like the dashboard-style
- layout of this sheet does across a whole tab), mismatched cells silently come back
- null. Scoping each fetch to one clean block avoids that entirely.
+ Fixed, absolute row positions in each tab (0-indexed, since headers=0 means
+ every row of the sheet comes back in table.rows, nothing pre-stripped as a
+ header). These match the sheet's fixed dashboard layout exactly:
+   RINGKASAN TAHUNAN — row 5: annual KPI row · row 9: annual balance row ·
+                        rows 14-25: the 12 monthly rows (Jan..Dis)
+   Each month tab     — rows 6-11: the 6 shedhouse summary rows ·
+                        row 12: month total row · row 15: daily header ·
+                        row 16 onward: daily records
 */
 
 async function syncAnnual(){
   try{
-    // Sequential (not parallel) requests: more reliable on mobile networks —
-    // several simultaneous script-tag JSONP calls to the same endpoint are more
-    // prone to a stray timeout/drop than the same calls done one after another.
-    const kpiT = await fetchRangeJSONP('RINGKASAN TAHUNAN', 'A6:M6', 8000);
-    const balT = await fetchRangeJSONP('RINGKASAN TAHUNAN', 'A10:M10', 8000);
-    const monthlyT = await fetchRangeJSONP('RINGKASAN TAHUNAN', 'A15:K26', 8000);
-    const g = kpiT.rows[0];
-    const b = balT.rows[0];
+    const table = await fetchSheetJSONP('RINGKASAN TAHUNAN', 9000);
+    const rows = table.rows;
+    const g = rows[5];
+    const b = rows[9];
+    if (!g || !b) throw new Error('missing KPI/balance rows');
     const annual = {
       gross_kg: cellVal(g,0), net_kg: cellVal(g,3), waste_kg: cellVal(g,6),
       waste_pct: cellVal(g,9), complete_records: cellVal(g,12),
@@ -511,17 +531,24 @@ async function syncAnnual(){
       baglog_balance: cellVal(b,9), baglog_harvest: cellVal(b,12),
       monthly: []
     };
-    monthlyT.rows.forEach(r => {
+    for (let i = 14; i <= 25; i++){
+      const r = rows[i]; if (!r) break;
       const bulan = cellVal(r,0);
-      if (!bulan) return;
+      if (!bulan) continue;
       annual.monthly.push({
         bulan: bulan, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
         baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
         net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8),
         baglog_harvest: cellVal(r,9), rekod_lengkap: cellVal(r,10)
       });
-    });
-    if (!annual.monthly.length) throw new Error('empty monthly parse');
+    }
+    // Sanity check: the annual gross figure must be at least as large as any
+    // single month's gross figure. If it isn't, we almost certainly parsed
+    // the wrong row (e.g. a monthly row instead of the KPI row) — reject
+    // the whole sync rather than display a wrong number as if it were real.
+    if (annual.monthly.length !== 12) throw new Error('expected 12 months, got ' + annual.monthly.length);
+    const maxMonthGross = Math.max(...annual.monthly.map(m => m.gross_kg || 0));
+    if ((annual.gross_kg || 0) < maxMonthGross) throw new Error('annual figure smaller than a monthly figure — bad parse');
     DATA.annual = annual;
     state.liveOK = true;
     return true;
@@ -530,22 +557,22 @@ async function syncAnnual(){
 
 async function syncMonth(key){
   try{
-    const shedT = await fetchRangeJSONP(key, 'A7:J12', 8000);
-    const totT = await fetchRangeJSONP(key, 'A13:J13', 8000);
-    const dailyT = await fetchRangeJSONP(key, 'A17:K1000', 8000);
+    const table = await fetchSheetJSONP(key, 9000);
+    const rows = table.rows;
     const shedhouse_summary = [];
-    shedT.rows.forEach(r => {
+    for (let i = 6; i <= 11; i++){
+      const r = rows[i]; if (!r) continue;
       const name = cellVal(r,0);
-      if (!name) return;
+      if (!name) continue;
       shedhouse_summary.push({
         shedhouse: name, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
         baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
         net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8), baglog_harvest: cellVal(r,9)
       });
-    });
+    }
     if (shedhouse_summary.length < SHEDHOUSES.length) throw new Error('incomplete shedhouse parse');
     let month_total = null;
-    const t = totT.rows[0];
+    const t = rows[12];
     if (t && cellVal(t,0) !== null){
       month_total = {
         opening_balance: cellVal(t,1), baglog_in: cellVal(t,2), baglog_out: cellVal(t,3),
@@ -554,18 +581,19 @@ async function syncMonth(key){
       };
     }
     const daily = [];
-    dailyT.rows.forEach(r => {
+    for (let i = 16; i < rows.length; i++){
+      const r = rows[i]; if (!r) continue;
       const shed = cellVal(r,3);
-      if (!shed) return;
+      if (!shed) continue;
       const bagIn = cellVal(r,4), bagOut = cellVal(r,5), gross = cellVal(r,6),
             net = cellVal(r,7), waste = cellVal(r,8), wastePct = cellVal(r,9), harvest = cellVal(r,10);
-      if (bagIn===null && bagOut===null && gross===null && net===null && waste===null && harvest===null) return;
+      if (bagIn===null && bagOut===null && gross===null && net===null && waste===null && harvest===null) continue;
       daily.push({
         tarikh: cellDate(r,0), hari: cellVal(r,1), minggu: cellVal(r,2), shedhouse: shed,
         baglog_in: bagIn, baglog_out: bagOut, gross_kg: gross, net_kg: net,
         waste_kg: waste, waste_pct: wastePct, baglog_harvest: harvest
       });
-    });
+    }
     DATA.months[key] = {
       name: MONTH_NAMES[MONTH_KEYS.indexOf(key)],
       shedhouse_summary, month_total, daily
