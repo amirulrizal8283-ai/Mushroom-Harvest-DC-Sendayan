@@ -316,7 +316,7 @@ button{font-family:inherit;}
         </div>
       </div>
 
-      <p class="footer-credit">Data disegerak terus daripada Google Sheet DC Sendayan</p>
+      <p class="footer-credit">Data disegerak terus daripada Google Sheet DC Sendayan &middot; build 2026-09-04-4</p>
     </section>
 
     <!-- SHEDHOUSE -->
@@ -517,76 +517,48 @@ function cellDate(row, idx){
                         row 16 onward: daily records
 */
 
-// Fetch just specific columns via a SELECT query. Used for the annual KPI/balance
-// rows, which use merged cells in the sheet (a big number spanning 3 columns) —
-// merged cells make plain whole-row reads misalign (values shift into the wrong
-// field). Asking for exactly the populated columns (A,D,G,J,M) sidesteps that:
-// gviz returns precisely those 5 values per row, in that order, no gaps to misread.
-function fetchSelectJSONP(sheetName, selectCols, timeoutMs){
-  return new Promise((resolve, reject) => {
-    const cbName = '__gvizCb_' + (jsonpCounter++) + '_' + Date.now();
-    const tq = encodeURIComponent('SELECT ' + selectCols.join(','));
-    const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID +
-      '/gviz/tq?tqx=out:json;responseHandler:' + cbName +
-      '&headers=0&sheet=' + encodeURIComponent(sheetName) + '&tq=' + tq;
-    let done = false;
-    const script = document.createElement('script');
-    const timer = setTimeout(() => {
-      if (done) return;
-      done = true;
-      cleanup();
-      reject(new Error('timeout'));
-    }, timeoutMs || 8000);
-    function cleanup(){
-      clearTimeout(timer);
-      delete window[cbName];
-      if (script.parentNode) script.parentNode.removeChild(script);
-    }
-    window[cbName] = function(resp){
-      if (done) return;
-      done = true;
-      cleanup();
-      try{
-        if (!resp || !resp.table) { reject(new Error('bad response')); return; }
-        resolve(resp.table);
-      } catch(e){ reject(e); }
-    };
-    script.onerror = () => { if (done) return; done = true; cleanup(); reject(new Error('script error')); };
-    script.src = url;
-    document.body.appendChild(script);
-  });
-}
-
 async function syncAnnual(){
   try{
-    const kpiTable = await fetchSelectJSONP('RINGKASAN TAHUNAN', ['A','D','G','J','M'], 9000);
-    const monthlyFull = await fetchSheetJSONP('RINGKASAN TAHUNAN', 9000);
-    const rows = monthlyFull.rows;
-    const g = kpiTable.rows[5];   // 5 values in fixed order: gross, net, waste_kg, waste_pct, rekod
-    const b = kpiTable.rows[9];   // 5 values in fixed order: opening, in, out, balance, harvest
-    if (!g || !b) throw new Error('missing KPI/balance rows');
-    const annual = {
-      gross_kg: cellVal(g,0), net_kg: cellVal(g,1), waste_kg: cellVal(g,2),
-      waste_pct: cellVal(g,3), complete_records: cellVal(g,4),
-      opening_balance: cellVal(b,0), baglog_in: cellVal(b,1), baglog_out: cellVal(b,2),
-      baglog_balance: cellVal(b,3), baglog_harvest: cellVal(b,4),
-      monthly: []
-    };
+    // Deliberately NOT reading the merged-cell KPI/balance summary rows at all —
+    // those have proven unreliable to read via the API. Instead, the annual
+    // totals are computed client-side by aggregating the 12 monthly rows, which
+    // are a plain (non-merged) table and have read correctly and consistently
+    // every time so far (this is the same data driving the trend chart).
+    const table = await fetchSheetJSONP('RINGKASAN TAHUNAN', 9000);
+    const rows = table.rows;
+    const monthly = [];
     for (let i = 14; i <= 25; i++){
       const r = rows[i]; if (!r) break;
       const bulan = cellVal(r,0);
       if (!bulan) continue;
-      annual.monthly.push({
+      monthly.push({
         bulan: bulan, opening_balance: cellVal(r,1), baglog_in: cellVal(r,2),
         baglog_out: cellVal(r,3), baglog_balance: cellVal(r,4), gross_kg: cellVal(r,5),
         net_kg: cellVal(r,6), waste_kg: cellVal(r,7), waste_pct: cellVal(r,8),
         baglog_harvest: cellVal(r,9), rekod_lengkap: cellVal(r,10)
       });
     }
+    if (monthly.length !== 12) throw new Error('expected 12 months, got ' + monthly.length);
+
+    const sum = (field) => monthly.reduce((acc,m) => acc + (Number(m[field]) || 0), 0);
+    const gross_kg = sum('gross_kg');
+    const net_kg = sum('net_kg');
+    const waste_kg = sum('waste_kg');
+    const annual = {
+      gross_kg, net_kg, waste_kg,
+      waste_pct: gross_kg > 0 ? waste_kg / gross_kg : 0,
+      complete_records: sum('rekod_lengkap'),
+      opening_balance: monthly[0].opening_balance,
+      baglog_in: sum('baglog_in'),
+      baglog_out: sum('baglog_out'),
+      baglog_balance: monthly[11].baglog_balance,
+      baglog_harvest: sum('baglog_harvest'),
+      monthly
+    };
+
     // Sanity checks: reject the whole sync (keep old data) if anything reads
     // implausible, rather than display an obviously-wrong number as if real.
-    if (annual.monthly.length !== 12) throw new Error('expected 12 months, got ' + annual.monthly.length);
-    const maxMonthGross = Math.max(...annual.monthly.map(m => m.gross_kg || 0));
+    const maxMonthGross = Math.max(...monthly.map(m => m.gross_kg || 0));
     if ((annual.gross_kg || 0) < maxMonthGross) throw new Error('annual gross smaller than a monthly gross — bad parse');
     if ((annual.net_kg || 0) > (annual.gross_kg || 0)) throw new Error('net exceeds gross — bad parse');
     if (annual.waste_pct !== null && (annual.waste_pct < 0 || annual.waste_pct > 2)) throw new Error('waste % out of range — bad parse');
