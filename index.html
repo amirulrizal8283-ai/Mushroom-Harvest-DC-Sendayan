@@ -152,6 +152,7 @@ button{font-family:inherit;}
 .month-snapshot{
   display:flex; align-items:center; justify-content:space-between;
   background:var(--bg-soft); border-radius:var(--radius-md); padding:14px 16px; margin-bottom:14px;
+  cursor:pointer;
 }
 .month-snapshot .m-name{font-family:'Fraunces',serif; font-size:16px; font-weight:600;}
 .month-snapshot .m-sub{font-size:11.5px; color:var(--ink-soft); margin-top:2px;}
@@ -265,11 +266,14 @@ button{font-family:inherit;}
 
     <!-- DASHBOARD -->
     <section class="view active" id="view-dashboard">
+      <p class="section-label">PAPARAN</p>
+      <div class="picker-scroll" id="monthPickerDash"></div>
+
       <div class="hero">
         <svg class="hero-gills" viewBox="0 0 100 100"><g stroke="#fff" stroke-width="1.6" fill="none"><line x1="50" y1="50" x2="95" y2="18"/><line x1="50" y1="50" x2="98" y2="35"/><line x1="50" y1="50" x2="100" y2="55"/><line x1="50" y1="50" x2="97" y2="75"/><line x1="50" y1="50" x2="88" y2="92"/><line x1="50" y1="50" x2="72" y2="99"/><line x1="50" y1="50" x2="60" y2="100"/></g></svg>
         <div class="hero-top">
           <div>
-            <p class="hero-eyebrow">Net harvest tahunan</p>
+            <p class="hero-eyebrow" id="heroEyebrow">Net harvest tahunan</p>
             <p class="hero-figure" id="heroNet">–<span class="hero-unit">kg</span></p>
             <p class="hero-sub" id="heroSub">Memuatkan data&hellip;</p>
           </div>
@@ -282,10 +286,10 @@ button{font-family:inherit;}
         </div>
       </div>
 
-      <div class="month-snapshot" id="monthSnapshot">
+      <div class="month-snapshot" id="monthSnapshot" onclick="pickDashMonth(currentMonthKey())">
         <div>
           <div class="m-name" id="snapMonthName">&mdash;</div>
-          <div class="m-sub" id="snapMonthSub">Bulan semasa</div>
+          <div class="m-sub" id="snapMonthSub">Bulan semasa &middot; tekan untuk lihat</div>
         </div>
         <div class="m-num">
           <div class="v" id="snapMonthNet">–</div>
@@ -362,11 +366,13 @@ const MS_INTERVAL_LIVE = 5 * 60 * 1000; // background refresh every 5 min while 
 let DATA = JSON.parse(document.getElementById('embedded-data').textContent);
 let state = {
   view: 'dashboard',
+  dashMonth: 'TAHUNAN',
   shedMonth: null,
   rekodMonth: null,
   rekodShed: 'ALL',
   liveOK: false,
 };
+let syncGen = 0; // request generation guard — stale async responses are ignored
 
 function currentMonthKey(){
   const d = new Date();
@@ -490,11 +496,12 @@ function cellDate(row, idx){
 
 async function syncAnnual(){
   try{
-    const [kpiT, balT, monthlyT] = await Promise.all([
-      fetchRangeJSONP('RINGKASAN TAHUNAN', 'A6:M6', 8000),
-      fetchRangeJSONP('RINGKASAN TAHUNAN', 'A10:M10', 8000),
-      fetchRangeJSONP('RINGKASAN TAHUNAN', 'A15:K26', 8000),
-    ]);
+    // Sequential (not parallel) requests: more reliable on mobile networks —
+    // several simultaneous script-tag JSONP calls to the same endpoint are more
+    // prone to a stray timeout/drop than the same calls done one after another.
+    const kpiT = await fetchRangeJSONP('RINGKASAN TAHUNAN', 'A6:M6', 8000);
+    const balT = await fetchRangeJSONP('RINGKASAN TAHUNAN', 'A10:M10', 8000);
+    const monthlyT = await fetchRangeJSONP('RINGKASAN TAHUNAN', 'A15:K26', 8000);
     const g = kpiT.rows[0];
     const b = balT.rows[0];
     const annual = {
@@ -523,11 +530,9 @@ async function syncAnnual(){
 
 async function syncMonth(key){
   try{
-    const [shedT, totT, dailyT] = await Promise.all([
-      fetchRangeJSONP(key, 'A7:J12', 8000),
-      fetchRangeJSONP(key, 'A13:J13', 8000),
-      fetchRangeJSONP(key, 'A17:K1000', 8000),
-    ]);
+    const shedT = await fetchRangeJSONP(key, 'A7:J12', 8000);
+    const totT = await fetchRangeJSONP(key, 'A13:J13', 8000);
+    const dailyT = await fetchRangeJSONP(key, 'A17:K1000', 8000);
     const shedhouse_summary = [];
     shedT.rows.forEach(r => {
       const name = cellVal(r,0);
@@ -570,25 +575,77 @@ async function syncMonth(key){
   } catch(e){ return false; }
 }
 
+async function manualRefresh(){
+  const myGen = ++syncGen;
+  setSyncStatus('syncing');
+  const okA = await syncAnnual();
+  let okB = true;
+  if (state.view === 'shedhouse') okB = await syncMonth(state.shedMonth);
+  else if (state.view === 'rekod') okB = await syncMonth(state.rekodMonth);
+  else okB = (state.dashMonth === 'TAHUNAN') ? true : await syncMonth(state.dashMonth);
+  if (myGen !== syncGen) return;
+  setSyncStatus(okA || okB ? 'live' : 'err');
+  renderAll();
+}
+
 /* ============ Rendering ============ */
 let trendChartInstance = null;
 
+async function pickDashMonth(key){
+  if (state.dashMonth === key) return;
+  state.dashMonth = key;
+  renderDashboard(); // instant render from whatever is already cached — never blocks on network
+  const myGen = ++syncGen;
+  setSyncStatus('syncing');
+  const ok = key === 'TAHUNAN' ? await syncAnnual() : await syncMonth(key);
+  if (myGen !== syncGen) return; // a newer pick happened meanwhile — drop this stale result
+  setSyncStatus(ok ? 'live' : 'err');
+  renderDashboard();
+}
+
 function renderDashboard(){
   const a = DATA.annual;
-  document.getElementById('heroNet').innerHTML = fmt(a.net_kg,0) + '<span class="hero-unit">kg</span>';
-  document.getElementById('heroGross').textContent = fmt(a.gross_kg,0);
-  document.getElementById('heroWaste').textContent = fmtPct(a.waste_pct);
-  document.getElementById('heroBalance').textContent = fmt(a.baglog_balance,0);
-  document.getElementById('heroSub').textContent = fmt(a.complete_records,0) + ' rekod harian lengkap · 2026';
-  document.getElementById('sumIn').textContent = fmt(a.baglog_in,0);
-  document.getElementById('sumOut').textContent = fmt(a.baglog_out,0);
-  document.getElementById('sumHarvest').textContent = fmt(a.baglog_harvest,0);
+  const isYear = state.dashMonth === 'TAHUNAN';
+
+  document.getElementById('monthSnapshot').style.display = isYear ? 'flex' : 'none';
+
+  if (isYear){
+    document.getElementById('heroEyebrow').textContent = 'Net harvest tahunan';
+    document.getElementById('heroBadge').textContent = '2026';
+    document.getElementById('heroNet').innerHTML = fmt(a.net_kg,0) + '<span class="hero-unit">kg</span>';
+    document.getElementById('heroGross').textContent = fmt(a.gross_kg,0);
+    document.getElementById('heroWaste').textContent = fmtPct(a.waste_pct);
+    document.getElementById('heroBalance').textContent = fmt(a.baglog_balance,0);
+    document.getElementById('heroSub').textContent = fmt(a.complete_records,0) + ' rekod harian lengkap · 2026';
+    document.getElementById('sumIn').textContent = fmt(a.baglog_in,0);
+    document.getElementById('sumOut').textContent = fmt(a.baglog_out,0);
+    document.getElementById('sumHarvest').textContent = fmt(a.baglog_harvest,0);
+  } else {
+    const key = state.dashMonth;
+    const m = DATA.months[key];
+    const annualRow = a.monthly.find(r => r.bulan === monthName(key));
+    const tot = (m && m.month_total) ? m.month_total : annualRow;
+    const rekod = annualRow ? annualRow.rekod_lengkap : null;
+
+    document.getElementById('heroEyebrow').textContent = 'Net harvest ' + monthName(key).toLowerCase();
+    document.getElementById('heroBadge').textContent = shortMonth(key) + ' 2026';
+    document.getElementById('heroNet').innerHTML = fmt(tot && tot.net_kg,0) + '<span class="hero-unit">kg</span>';
+    document.getElementById('heroGross').textContent = fmt(tot && tot.gross_kg,0);
+    document.getElementById('heroWaste').textContent = fmtPct(tot && tot.waste_pct);
+    document.getElementById('heroBalance').textContent = fmt(tot && tot.baglog_balance,0);
+    document.getElementById('heroSub').textContent = (rekod!==null ? fmt(rekod,0) : '0') + ' rekod harian lengkap · ' + monthName(key).toLowerCase();
+    document.getElementById('sumIn').textContent = fmt(tot && tot.baglog_in,0);
+    document.getElementById('sumOut').textContent = fmt(tot && tot.baglog_out,0);
+    document.getElementById('sumHarvest').textContent = fmt(tot && tot.baglog_harvest,0);
+  }
 
   const ck = currentMonthKey();
   const cm = DATA.months[ck];
   document.getElementById('snapMonthName').textContent = monthName(ck);
   document.getElementById('snapMonthSub').textContent = 'Bulan semasa · ' + (cm && cm.month_total ? fmt(cm.month_total.baglog_harvest,0)+' baglog habis harvest' : 'belum ada rekod');
   document.getElementById('snapMonthNet').textContent = cm && cm.month_total ? fmt(cm.month_total.net_kg,0) : '0';
+
+  buildDashPicker();
 
   const labels = a.monthly.map(m => m.bulan.slice(0,3).charAt(0)+m.bulan.slice(1,3).toLowerCase());
   const netData = a.monthly.map(m => m.net_kg || 0);
@@ -617,6 +674,26 @@ function renderDashboard(){
   });
 }
 
+function buildDashPicker(){
+  const container = document.getElementById('monthPickerDash');
+  const current = document.getElementById('monthPickerDash').dataset.current;
+  if (current === state.dashMonth) return; // already built for this selection — avoid rebuilding mid-scroll
+  container.dataset.current = state.dashMonth;
+  container.innerHTML = '';
+  const yearBtn = document.createElement('button');
+  yearBtn.className = 'pill' + (state.dashMonth==='TAHUNAN' ? ' active':'');
+  yearBtn.textContent = 'Tahunan';
+  yearBtn.onclick = () => pickDashMonth('TAHUNAN');
+  container.appendChild(yearBtn);
+  MONTH_KEYS.forEach((key,i) => {
+    const btn = document.createElement('button');
+    btn.className = 'pill' + (key===state.dashMonth ? ' active' : '');
+    btn.textContent = shortMonth(key);
+    btn.onclick = () => pickDashMonth(key);
+    container.appendChild(btn);
+  });
+}
+
 function buildMonthPicker(container, current, onPick){
   container.innerHTML = '';
   MONTH_KEYS.forEach((key,i) => {
@@ -630,10 +707,13 @@ function buildMonthPicker(container, current, onPick){
 
 function renderShedhouse(){
   buildMonthPicker(document.getElementById('monthPickerShed'), state.shedMonth, async (key) => {
+    if (state.shedMonth === key) return;
     state.shedMonth = key;
-    renderShedhouse();
+    renderShedhouse(); // instant render from cache
+    const myGen = ++syncGen;
     setSyncStatus('syncing');
     const ok = await syncMonth(key);
+    if (myGen !== syncGen) return;
     setSyncStatus(ok ? 'live':'err');
     renderShedhouse();
   });
@@ -674,10 +754,13 @@ function renderShedhouse(){
 
 function renderRekod(){
   buildMonthPicker(document.getElementById('monthPickerRekod'), state.rekodMonth, async (key) => {
+    if (state.rekodMonth === key) return;
     state.rekodMonth = key;
-    renderRekod();
+    renderRekod(); // instant render from cache
+    const myGen = ++syncGen;
     setSyncStatus('syncing');
     const ok = await syncMonth(key);
+    if (myGen !== syncGen) return;
     setSyncStatus(ok ? 'live':'err');
     renderRekod();
   });
@@ -748,17 +831,22 @@ renderAll();
 setSyncStatus('idle');
 
 (async () => {
+  let myGen = ++syncGen;
   setSyncStatus('syncing');
   const okA = await syncAnnual();
   const okB = await syncMonth(currentMonthKey());
-  setSyncStatus(okA || okB ? 'live' : 'err');
-  renderAll();
+  if (myGen === syncGen){
+    setSyncStatus(okA || okB ? 'live' : 'err');
+    renderAll();
+  }
   setInterval(async () => {
+    myGen = ++syncGen;
     const okA2 = await syncAnnual();
     let okB2 = true;
     if (state.view === 'shedhouse') okB2 = await syncMonth(state.shedMonth);
     else if (state.view === 'rekod') okB2 = await syncMonth(state.rekodMonth);
-    else okB2 = await syncMonth(currentMonthKey());
+    else okB2 = (state.dashMonth === 'TAHUNAN') ? true : await syncMonth(state.dashMonth);
+    if (myGen !== syncGen) return;
     setSyncStatus(okA2 || okB2 ? 'live' : 'err');
     renderAll();
   }, MS_INTERVAL_LIVE);
